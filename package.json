@@ -1,0 +1,8 @@
+{
+  "name": "motorpoint-backend",
+  "version": "1.0.0",
+  "private": true,
+  "description": "MotorPoint - back-end Node.js e persistência local (etapa antes do MySQL)",
+  "scripts": { "setup": "node setup.js", "start": "node server.js", "test": "node --test" },
+  "engines": { "node": ">=20" }
+}
