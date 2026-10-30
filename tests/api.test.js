@@ -8,7 +8,7 @@ const { spawn, spawnSync } = require('node:child_process');
 const net = require('node:net');
 const root = fs.mkdtempSync(path.join(os.tmpdir(), 'motorpoint-test-'));
 for (const f of ['server.js','setup.js','server-crypto.js']) fs.copyFileSync(path.join(__dirname,'..',f), path.join(root,f));
-for (const dir of ['storage','lib']) fs.cpSync(path.join(__dirname,'..',dir),path.join(root,dir),{recursive:true});
+for (const dir of ['storage','lib','auth','routes']) fs.cpSync(path.join(__dirname,'..',dir),path.join(root,dir),{recursive:true});
 fs.mkdirSync(path.join(root,'data'));
 // As telas sao externas ao repositorio do back-end.
 const front = path.join(root, 'frontend-externo');
@@ -63,6 +63,9 @@ test('MotorPoint: autenticação, CRUD, venda e persistência após reiniciar', 
   assert.equal(login.status,200);
   const cookie=login.cookie;
   assert.ok(cookie.includes('mp_session='));
+  const quemSou = await call('/api/auth/me','GET',undefined,cookie);
+  assert.equal(quemSou.status,200);
+  assert.equal(quemSou.data.perfil,'Administrador');
   assert.equal((await call('/api/relatorios/pecas-motos')).status,401);
   const vazio = await call('/api/relatorios/pecas-motos','GET',undefined,cookie);
   assert.equal(vazio.status,200);
@@ -125,5 +128,7 @@ test('MotorPoint: autenticação, CRUD, venda e persistência após reiniciar', 
   assert.equal((await call('/api/usuarios','GET',undefined,cookie2)).data.length,1);
   assert.equal((await call('/api/relatorios/pecas-motos','GET',undefined,cookie2)).data.resumo.totalMotos,1);
   assert.equal((await call('/api/relatorios/pecas-motos','GET',undefined,cookie2)).data.resumo.valorPotencial,127.5);
+  assert.equal((await call('/api/auth/logout','POST',{},cookie2)).status,200);
+  assert.equal((await call('/api/auth/me','GET',undefined,cookie2)).status,401);
 
 });

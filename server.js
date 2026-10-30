@@ -9,12 +9,12 @@ const crypto = require('node:crypto');
 const FRONTEND_ROOT = process.env.FRONTEND_DIR ? path.resolve(process.env.FRONTEND_DIR) : null;
 const PORT = Number(process.env.PORT || 3000);
 const HOST = process.env.HOST || '127.0.0.1';
-const SESSIONS = new Map(); // login é refeito se o servidor reiniciar
 const PUBLIC_PATH = '/telaLogin/index.html';
 
-class HttpError extends Error {
-  constructor(status, message) { super(message); this.status = status; }
-}
+const { HttpError } = require('./lib/errors');
+const { hashPassword, safeUser } = require('./auth/password');
+const { sessionFrom, requireAuth } = require('./auth/sessions');
+const { handlePublicAuth, handlePrivateAuth } = require('./routes/auth');
 // Leitura e escrita dos dados foram movidas para storage/json.js.
 const { getStore, mutate } = require('./storage/json');
 const text = (value, max = 255) => typeof value === 'string' ? value.trim().slice(0, max) : '';
@@ -40,37 +40,6 @@ function unique(rows, prop, val, skipId, label) {
   if (rows.some(r => r.id !== skipId && String(r[prop] || '').toLowerCase() === String(val).toLowerCase())) {
     throw new HttpError(409, `${label} já cadastrado(a).`);
   }
-}
-function hashPassword(senha, salt = crypto.randomBytes(16).toString('hex')) {
-  return { salt, senhaHash: crypto.scryptSync(senha, salt, 64).toString('hex') };
-}
-function checkPassword(senha, user) {
-  if (!user?.salt || !user?.senhaHash) return false;
-  const hash = crypto.scryptSync(senha, user.salt, 64);
-  const esperado = Buffer.from(user.senhaHash, 'hex');
-  return hash.length === esperado.length && crypto.timingSafeEqual(hash, esperado);
-}
-const safeUser = u => { const { senhaHash, salt, ...publicData } = u; return publicData; };
-const sessionFrom = req => {
-  const cookies = Object.fromEntries((req.headers.cookie || '').split(';').map(x => x.trim().split('=').map(decodeURIComponent)).filter(p => p.length === 2));
-  const sid = cookies.mp_session;
-  const sess = SESSIONS.get(sid);
-  if (!sess) return null;
-  if (Date.now() > sess.expires) { SESSIONS.delete(sid); return null; }
-  // Revogação simples se usuário for excluído.
-  if (sess.userId !== 'admin') {
-    const u = getStore().usuarios.find(x => x.id === sess.userId);
-    if (!u) { SESSIONS.delete(sid); return null; }
-    return { userId: u.id, nome: u.nome, perfil: u.nivelPermissao || 'Operador', sid };
-  }
-  return { userId: 'admin', nome: 'Administrador', perfil: 'Administrador', sid };
-};
-function requireAuth(req, { admin = false } = {}) {
-  const u = sessionFrom(req);
-  if (!u) throw new HttpError(401, 'Sessão expirada. Entre novamente.');
-  if (u.perfil === 'Cliente') throw new HttpError(403, 'Perfil sem acesso ao sistema interno.');
-  if (admin && u.perfil !== 'Administrador') throw new HttpError(403, 'Apenas administradores podem realizar esta operação.');
-  return u;
 }
 function send(res, status, data, extraHeaders = {}) {
   res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff', ...extraHeaders });
@@ -151,25 +120,10 @@ function normalizePedido(b, s, old = null) {
 function handleApi(req, res, pathname, body) {
   const method = req.method;
   if (pathname === '/api/health' && method === 'GET') return send(res, 200, { ok: true });
-  if (pathname === '/api/auth/login' && method === 'POST') {
-    const entrada = text(body.usuario, 200).toLowerCase();
-    const senha = body.senha;
-    const usuarios = [...getStore().usuarios];
-    const target = entrada === 'admin' ? { ...getStore().admin, id: 'admin', nome: 'Administrador', nivelPermissao: 'Administrador' } : usuarios.find(u => [u.nome?.toLowerCase(), u.email?.toLowerCase(), u.documento?.toLowerCase()].includes(entrada));
-    if (!entrada || typeof senha !== 'string' || !target || !checkPassword(senha, target)) throw new HttpError(401, 'Usuário ou senha incorretos.');
-    if (target.nivelPermissao === 'Cliente') throw new HttpError(403, 'Perfil Cliente não pode acessar o painel interno.');
-    const sid = crypto.randomBytes(32).toString('hex');
-    SESSIONS.set(sid, { userId: target.id, expires: Date.now() + 12 * 60 * 60_000 });
-    return send(res, 200, { usuario: target.nome, perfil: target.nivelPermissao }, {
-      'Set-Cookie': `mp_session=${sid}; HttpOnly; SameSite=Strict; Path=/; Max-Age=43200${req.socket.encrypted ? '; Secure' : ''}`
-    });
-  }
-  if (pathname === '/api/auth/logout' && method === 'POST') {
-    const sess = sessionFrom(req); if (sess) SESSIONS.delete(sess.sid);
-    return send(res, 200, { ok: true }, { 'Set-Cookie': 'mp_session=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0' });
-  }
+  // Etapa 2: rotas de login, logout e sessao foram separadas.
+  if (handlePublicAuth(req, res, pathname, body, { send, text })) return;
   const u = requireAuth(req);
-  if (pathname === '/api/auth/me' && method === 'GET') return send(res, 200, { nome: u.nome, perfil: u.perfil });
+  if (handlePrivateAuth(req, res, pathname, u, send)) return;
 
   const parts = pathname.split('/').filter(Boolean);
   const tipo = parts[1]; const recordId = parts[2]; const acao = parts[3];
