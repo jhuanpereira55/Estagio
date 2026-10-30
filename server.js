@@ -5,44 +5,18 @@ const fs = require('node:fs');
 const path = require('node:path');
 const crypto = require('node:crypto');
 
-const ROOT = __dirname; // pasta exclusiva do back-end
 // O front-end fica em outro projeto/pasta e e servido opcionalmente via FRONTEND_DIR.
 const FRONTEND_ROOT = process.env.FRONTEND_DIR ? path.resolve(process.env.FRONTEND_DIR) : null;
-const DATA_FILE = path.join(ROOT, 'data', 'store.json');
 const PORT = Number(process.env.PORT || 3000);
 const HOST = process.env.HOST || '127.0.0.1';
 const SESSIONS = new Map(); // login é refeito se o servidor reiniciar
 const PUBLIC_PATH = '/telaLogin/index.html';
-const DEFAULT = () => ({ admin: null, usuarios: [], motos: [], pecas: [], pedidos: [], vendas: [], agendamentos: [], coresDias: {} });
 
 class HttpError extends Error {
   constructor(status, message) { super(message); this.status = status; }
 }
-if (!fs.existsSync(DATA_FILE)) {
-  console.error('Sem configuração inicial. Rode primeiro: npm run setup');
-  process.exit(1);
-}
-let store;
-try {
-  store = { ...DEFAULT(), ...JSON.parse(fs.readFileSync(DATA_FILE, 'utf8')) };
-  if (!store.admin?.senhaHash) throw new Error('Administrador não configurado');
-} catch (err) {
-  console.error('Não foi possível ler data/store.json:', err.message);
-  process.exit(1);
-}
-function persist(next) {
-  // Arquivo temporário no mesmo volume: evita JSON truncado em reinício/fechamento.
-  const tmp = DATA_FILE + '.tmp';
-  fs.writeFileSync(tmp, JSON.stringify(next, null, 2) + '\n', { mode: 0o600 });
-  fs.renameSync(tmp, DATA_FILE);
-  store = next;
-}
-function mutate(fn) {
-  const next = structuredClone(store);
-  const result = fn(next);
-  persist(next);
-  return result;
-}
+// Leitura e escrita dos dados foram movidas para storage/json.js.
+const { getStore, mutate } = require('./storage/json');
 const text = (value, max = 255) => typeof value === 'string' ? value.trim().slice(0, max) : '';
 const required = (value, nome) => {
   const x = text(value);
@@ -85,7 +59,7 @@ const sessionFrom = req => {
   if (Date.now() > sess.expires) { SESSIONS.delete(sid); return null; }
   // Revogação simples se usuário for excluído.
   if (sess.userId !== 'admin') {
-    const u = store.usuarios.find(x => x.id === sess.userId);
+    const u = getStore().usuarios.find(x => x.id === sess.userId);
     if (!u) { SESSIONS.delete(sid); return null; }
     return { userId: u.id, nome: u.nome, perfil: u.nivelPermissao || 'Operador', sid };
   }
@@ -180,8 +154,8 @@ function handleApi(req, res, pathname, body) {
   if (pathname === '/api/auth/login' && method === 'POST') {
     const entrada = text(body.usuario, 200).toLowerCase();
     const senha = body.senha;
-    const usuarios = [...store.usuarios];
-    const target = entrada === 'admin' ? { ...store.admin, id: 'admin', nome: 'Administrador', nivelPermissao: 'Administrador' } : usuarios.find(u => [u.nome?.toLowerCase(), u.email?.toLowerCase(), u.documento?.toLowerCase()].includes(entrada));
+    const usuarios = [...getStore().usuarios];
+    const target = entrada === 'admin' ? { ...getStore().admin, id: 'admin', nome: 'Administrador', nivelPermissao: 'Administrador' } : usuarios.find(u => [u.nome?.toLowerCase(), u.email?.toLowerCase(), u.documento?.toLowerCase()].includes(entrada));
     if (!entrada || typeof senha !== 'string' || !target || !checkPassword(senha, target)) throw new HttpError(401, 'Usuário ou senha incorretos.');
     if (target.nivelPermissao === 'Cliente') throw new HttpError(403, 'Perfil Cliente não pode acessar o painel interno.');
     const sid = crypto.randomBytes(32).toString('hex');
@@ -206,7 +180,7 @@ function handleApi(req, res, pathname, body) {
         throw new HttpError(403, 'Somente administradores e operadores podem alterar esses cadastros.');
       }
     }
-    if (method === 'GET' && parts.length === 2) return send(res, 200, tipo === 'usuarios' ? store.usuarios.map(safeUser) : store[tipo]);
+    if (method === 'GET' && parts.length === 2) return send(res, 200, tipo === 'usuarios' ? getStore().usuarios.map(safeUser) : getStore()[tipo]);
     if (method === 'POST' && parts.length === 2) {
       const item = mutate(s => { const x = normalizeCadastro(tipo, body); validateUnique(s, tipo, x); s[tipo].push(x); return x; });
       return send(res, 201, tipo === 'usuarios' ? safeUser(item) : item);
@@ -229,13 +203,13 @@ function handleApi(req, res, pathname, body) {
   // Relatório somente de leitura: reúne os dois cadastros existentes.
   // Aplicação de peça é texto livre; não inferimos compatibilidade com uma moto.
   if (pathname === '/api/relatorios/pecas-motos' && method === 'GET') {
-    const pecas = store.pecas.map(p => ({
+    const pecas = getStore().pecas.map(p => ({
       codigoInterno: p.codigoInterno, descricao: p.descricao, marca: p.marca,
       aplicacao: p.aplicacao, localizacao: p.localizacao,
       quantidade: p.quantidade, precoVenda: p.precoVenda,
       valorPotencial: Math.round(p.quantidade * p.precoVenda * 100) / 100
     })).sort((a, b) => a.codigoInterno.localeCompare(b.codigoInterno, 'pt-BR', { numeric: true }));
-    const motos = store.motos.map(m => ({
+    const motos = getStore().motos.map(m => ({
       placa: m.placa, dono: m.dono, marca: m.marca, modelo: m.modelo,
       ano: m.ano, cor: m.cor
     })).sort((a, b) => a.placa.localeCompare(b.placa, 'pt-BR'));
@@ -248,7 +222,7 @@ function handleApi(req, res, pathname, body) {
     };
     return send(res, 200, { geradoEm: new Date().toISOString(), resumo, pecas, motos });
   }
-  if (pathname === '/api/pedidos' && method === 'GET') return send(res, 200, store.pedidos);
+  if (pathname === '/api/pedidos' && method === 'GET') return send(res, 200, getStore().pedidos);
   if (pathname === '/api/pedidos' && method === 'POST') return send(res, 201, mutate(s => {
     const x = normalizePedido(body, s); s.pedidos.push(x); return x;
   }));
@@ -279,7 +253,7 @@ function handleApi(req, res, pathname, body) {
       status: 'Concluída' };
     s.vendas.push(v); p.status = 'Faturado'; return v;
   }));
-  if (pathname === '/api/vendas' && method === 'GET') return send(res, 200, store.vendas);
+  if (pathname === '/api/vendas' && method === 'GET') return send(res, 200, getStore().vendas);
   if (tipo === 'vendas' && recordId && acao === 'cancelar' && method === 'POST') return send(res, 200, mutate(s => {
     const v = findOr404(s.vendas, recordId, 'Venda');
     if (v.status !== 'Concluída') throw new HttpError(409, 'A venda já foi cancelada.');
@@ -288,7 +262,7 @@ function handleApi(req, res, pathname, body) {
     findOr404(s.pedidos, v.pedidoId, 'Pedido').status = 'Cancelado';
     return v;
   }));
-  if (pathname === '/api/config' && method === 'GET') return send(res, 200, { agendamentos: store.agendamentos, coresDias: store.coresDias });
+  if (pathname === '/api/config' && method === 'GET') return send(res, 200, { agendamentos: getStore().agendamentos, coresDias: getStore().coresDias });
   if (pathname === '/api/config' && method === 'PATCH') return send(res, 200, mutate(s => {
     if (body.agendamentos !== undefined) {
       if (!Array.isArray(body.agendamentos) || body.agendamentos.length > 5000) throw new HttpError(400, 'Agendamentos inválidos.');

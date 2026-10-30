@@ -8,6 +8,7 @@ const { spawn, spawnSync } = require('node:child_process');
 const net = require('node:net');
 const root = fs.mkdtempSync(path.join(os.tmpdir(), 'motorpoint-test-'));
 for (const f of ['server.js','setup.js','server-crypto.js']) fs.copyFileSync(path.join(__dirname,'..',f), path.join(root,f));
+for (const dir of ['storage','lib']) fs.cpSync(path.join(__dirname,'..',dir),path.join(root,dir),{recursive:true});
 fs.mkdirSync(path.join(root,'data'));
 // As telas sao externas ao repositorio do back-end.
 const front = path.join(root, 'frontend-externo');
