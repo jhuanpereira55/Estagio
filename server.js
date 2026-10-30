@@ -3,7 +3,6 @@
 const http = require('node:http');
 const fs = require('node:fs');
 const path = require('node:path');
-const crypto = require('node:crypto');
 
 // O front-end fica em outro projeto/pasta e e servido opcionalmente via FRONTEND_DIR.
 const FRONTEND_ROOT = process.env.FRONTEND_DIR ? path.resolve(process.env.FRONTEND_DIR) : null;
@@ -12,35 +11,13 @@ const HOST = process.env.HOST || '127.0.0.1';
 const PUBLIC_PATH = '/telaLogin/index.html';
 
 const { HttpError } = require('./lib/errors');
-const { hashPassword, safeUser } = require('./auth/password');
+const { hashPassword } = require('./auth/password');
 const { sessionFrom, requireAuth } = require('./auth/sessions');
 const { handlePublicAuth, handlePrivateAuth } = require('./routes/auth');
 // Leitura e escrita dos dados foram movidas para storage/json.js.
 const { getStore, mutate } = require('./storage/json');
-const text = (value, max = 255) => typeof value === 'string' ? value.trim().slice(0, max) : '';
-const required = (value, nome) => {
-  const x = text(value);
-  if (!x) throw new HttpError(400, `Informe ${nome}.`);
-  return x;
-};
-const numberNonnegative = (v, field, integer = false) => {
-  if (v === '' || v == null || !Number.isFinite(Number(v)) || Number(v) < 0 || (integer && !Number.isInteger(Number(v)))) {
-    throw new HttpError(400, `${field} inválido.`);
-  }
-  return Number(v);
-};
-const id = () => crypto.randomUUID();
-const findOr404 = (records, recordId, tipo) => {
-  const rec = records.find(x => x.id === recordId);
-  if (!rec) throw new HttpError(404, `${tipo} não encontrado(a).`);
-  return rec;
-};
-const digits = v => text(v).replace(/\D/g, '');
-function unique(rows, prop, val, skipId, label) {
-  if (rows.some(r => r.id !== skipId && String(r[prop] || '').toLowerCase() === String(val).toLowerCase())) {
-    throw new HttpError(409, `${label} já cadastrado(a).`);
-  }
-}
+const { text, required, numberNonnegative, id, findOr404 } = require('./services/validacoes');
+const { handleCadastros } = require('./routes/cadastros');
 function send(res, status, data, extraHeaders = {}) {
   res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff', ...extraHeaders });
   res.end(JSON.stringify(data));
@@ -54,45 +31,6 @@ function getBody(req) {
     });
     req.on('error', reject);
   });
-}
-function normalizeCadastro(tipo, body, older = null) {
-  if (!body || typeof body !== 'object' || Array.isArray(body)) throw new HttpError(400, 'Dados inválidos.');
-  const novo = { id: older?.id || id() };
-  if (tipo === 'pecas') {
-    for (const f of ['codigoInterno', 'descricao']) novo[f] = required(body[f], f);
-    for (const f of ['codigoOriginal', 'marca', 'fornecedor', 'aplicacao', 'unidadeMedida', 'localizacao']) novo[f] = text(body[f]);
-    novo.quantidade = numberNonnegative(body.quantidade, 'quantidade', true);
-    novo.precoVenda = numberNonnegative(body.precoVenda, 'precoVenda');
-  } else if (tipo === 'motos') {
-    for (const f of ['dono', 'marca', 'placa', 'cor', 'chassi', 'ano', 'modelo']) novo[f] = required(body[f], f);
-    novo.placa = novo.placa.toUpperCase(); novo.chassi = novo.chassi.toUpperCase();
-    if (novo.chassi.length !== 17) throw new HttpError(400, 'Chassi deve ter 17 caracteres.');
-  } else if (tipo === 'usuarios') {
-    for (const f of ['nome', 'documento', 'cargo', 'email', 'telefone', 'nivelPermissao']) novo[f] = required(body[f], f);
-    novo.email = novo.email.toLowerCase();
-    novo.dataNascimento = text(body.dataNascimento);
-    if (!/^\S+@\S+\.\S+$/.test(novo.email)) throw new HttpError(400, 'E-mail inválido.');
-    if (!['Administrador', 'Operador', 'Mecânico', 'Cliente'].includes(novo.nivelPermissao)) throw new HttpError(400, 'Perfil inválido.');
-    if (body.senha) {
-      if (typeof body.senha !== 'string' || body.senha.length < 8) throw new HttpError(400, 'Senha deve ter pelo menos 8 caracteres.');
-      Object.assign(novo, hashPassword(body.senha));
-    } else if (older) {
-      novo.salt = older.salt; novo.senhaHash = older.senhaHash;
-    } else throw new HttpError(400, 'Informe a senha do usuário.');
-  }
-  return novo;
-}
-function validateUnique(s, tipo, novo) {
-  if (tipo === 'pecas') unique(s.pecas, 'codigoInterno', novo.codigoInterno, novo.id, 'Código interno');
-  if (tipo === 'motos') {
-    unique(s.motos, 'placa', novo.placa, novo.id, 'Placa');
-    unique(s.motos, 'chassi', novo.chassi, novo.id, 'Chassi');
-  }
-  if (tipo === 'usuarios') {
-    unique(s.usuarios, 'email', novo.email, novo.id, 'E-mail');
-    unique(s.usuarios, 'documento', digits(novo.documento), novo.id, 'Documento');
-    if (s.usuarios.some(u => u.id !== novo.id && digits(u.documento) === digits(novo.documento))) throw new HttpError(409, 'Documento já cadastrado.');
-  }
 }
 function normalizeItems(raw, s) {
   if (!Array.isArray(raw) || !raw.length || raw.length > 100) throw new HttpError(400, 'Adicione de 1 a 100 itens.');
@@ -127,33 +65,8 @@ function handleApi(req, res, pathname, body) {
 
   const parts = pathname.split('/').filter(Boolean);
   const tipo = parts[1]; const recordId = parts[2]; const acao = parts[3];
-  if (parts.length >= 2 && ['usuarios', 'motos', 'pecas'].includes(tipo)) {
-    if (['POST', 'PUT', 'DELETE'].includes(method)) {
-      const autorizado = requireAuth(req, { admin: tipo === 'usuarios' });
-      if (tipo !== 'usuarios' && !['Administrador', 'Operador'].includes(autorizado.perfil)) {
-        throw new HttpError(403, 'Somente administradores e operadores podem alterar esses cadastros.');
-      }
-    }
-    if (method === 'GET' && parts.length === 2) return send(res, 200, tipo === 'usuarios' ? getStore().usuarios.map(safeUser) : getStore()[tipo]);
-    if (method === 'POST' && parts.length === 2) {
-      const item = mutate(s => { const x = normalizeCadastro(tipo, body); validateUnique(s, tipo, x); s[tipo].push(x); return x; });
-      return send(res, 201, tipo === 'usuarios' ? safeUser(item) : item);
-    }
-    if (method === 'PUT' && parts.length === 3) {
-      const item = mutate(s => { const old = findOr404(s[tipo], recordId, tipo); const x = normalizeCadastro(tipo, body, old); validateUnique(s, tipo, x); s[tipo] = s[tipo].map(r => r.id === recordId ? x : r); return x; });
-      return send(res, 200, tipo === 'usuarios' ? safeUser(item) : item);
-    }
-    if (method === 'DELETE' && parts.length === 3) {
-      mutate(s => {
-        findOr404(s[tipo], recordId, tipo);
-        if (tipo === 'pecas' && (s.pedidos.some(p => p.itens.some(i => i.pecaId === recordId)) || s.vendas.some(v => v.itens.some(i => i.pecaId === recordId)))) {
-          throw new HttpError(409, 'Não exclua uma peça vinculada a pedidos/vendas.');
-        }
-        s[tipo] = s[tipo].filter(r => r.id !== recordId);
-      });
-      return send(res, 200, { ok: true });
-    }
-  }
+  // Etapa 3: cadastros agora ficam em routes/cadastros.js.
+  if (handleCadastros(req, res, pathname, body, send)) return;
   // Relatório somente de leitura: reúne os dois cadastros existentes.
   // Aplicação de peça é texto livre; não inferimos compatibilidade com uma moto.
   if (pathname === '/api/relatorios/pecas-motos' && method === 'GET') {

@@ -8,7 +8,7 @@ const { spawn, spawnSync } = require('node:child_process');
 const net = require('node:net');
 const root = fs.mkdtempSync(path.join(os.tmpdir(), 'motorpoint-test-'));
 for (const f of ['server.js','setup.js','server-crypto.js']) fs.copyFileSync(path.join(__dirname,'..',f), path.join(root,f));
-for (const dir of ['storage','lib','auth','routes']) fs.cpSync(path.join(__dirname,'..',dir),path.join(root,dir),{recursive:true});
+for (const dir of ['storage','lib','auth','routes','services']) fs.cpSync(path.join(__dirname,'..',dir),path.join(root,dir),{recursive:true});
 fs.mkdirSync(path.join(root,'data'));
 // As telas sao externas ao repositorio do back-end.
 const front = path.join(root, 'frontend-externo');
@@ -75,8 +75,13 @@ test('MotorPoint: autenticação, CRUD, venda e persistência após reiniciar', 
   assert.equal(ins.status,201);
   const pecaId=ins.data.id;
   assert.equal((await call('/api/pecas','POST',piece,cookie)).status,409);
+  // Regras do cadastro continuam funcionando depois da separacao das rotas.
+  assert.equal((await call('/api/pecas','POST',{...piece,codigoInterno:'TEST002',quantidade:-1},cookie)).status,400);
+  assert.equal((await call('/api/pecas','PUT',{...piece,descricao:'Teste'},cookie)).status,404);
+  assert.equal((await call(`/api/pecas/${pecaId}`,'PUT',piece,cookie)).status,200);
   const moto=await call('/api/motos','POST',{dono:'Cliente',marca:'Honda',placa:'ABC1D23',cor:'Preta',chassi:'12345678901234567',ano:'2020',modelo:'CG160'},cookie);
   assert.equal(moto.status,201);
+  assert.equal((await call('/api/motos','POST',{dono:'Cliente',marca:'Honda',placa:'XYZ1A23',cor:'Preta',chassi:'curto',ano:'2020',modelo:'CG160'},cookie)).status,400);
   const relatorio = await call('/api/relatorios/pecas-motos','GET',undefined,cookie);
   assert.equal(relatorio.status,200);
   assert.equal(relatorio.data.pecas.length,1);
@@ -90,6 +95,7 @@ test('MotorPoint: autenticação, CRUD, venda e persistência após reiniciar', 
 
   const cadastro=await call('/api/usuarios','POST',{nome:'Cliente Teste',documento:'111.111.111-11',cargo:'Atendente',email:'test@example.com',telefone:'(44) 99999-1111',nivelPermissao:'Operador',senha:'SenhaOperador567'},cookie);
   assert.equal(cadastro.status,201);
+  assert.equal((await call('/api/usuarios','POST',{nome:'Outro',documento:'11111111111',cargo:'Atendente',email:'outro@example.com',telefone:'(44)99999-1111',nivelPermissao:'Operador',senha:'SenhaOperador567'},cookie)).status,409);
   assert.equal(cadastro.data.senhaHash,undefined);
   assert.equal(cadastro.data.senha,undefined);
   assert.equal((await call('/api/usuarios','GET',undefined,cookie)).data[0].salt,undefined);
