@@ -16,8 +16,10 @@ const { sessionFrom, requireAuth } = require('./auth/sessions');
 const { handlePublicAuth, handlePrivateAuth } = require('./routes/auth');
 // Leitura e escrita dos dados foram movidas para storage/json.js.
 const { getStore, mutate } = require('./storage/json');
-const { text, required, numberNonnegative, id, findOr404 } = require('./services/validacoes');
+const { text, required, id } = require('./services/validacoes');
 const { handleCadastros } = require('./routes/cadastros');
+const { handlePedidos } = require('./routes/pedidos');
+const { handleVendas } = require('./routes/vendas');
 function send(res, status, data, extraHeaders = {}) {
   res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff', ...extraHeaders });
   res.end(JSON.stringify(data));
@@ -32,29 +34,6 @@ function getBody(req) {
     req.on('error', reject);
   });
 }
-function normalizeItems(raw, s) {
-  if (!Array.isArray(raw) || !raw.length || raw.length > 100) throw new HttpError(400, 'Adicione de 1 a 100 itens.');
-  const ids = new Set();
-  return raw.map(it => {
-    const pecaId = text(it.pecaId);
-    const p = findOr404(s.pecas, pecaId, 'Peça');
-    if (ids.has(pecaId)) throw new HttpError(400, 'Peça duplicada no pedido.');
-    ids.add(pecaId);
-    const qtd = numberNonnegative(it.qtd, 'Quantidade', true);
-    if (qtd < 1) throw new HttpError(400, 'Quantidade mínima é 1.');
-    return { pecaId: p.id, codigo: p.codigoInterno, descricao: p.descricao, marca: p.marca, qtd, preco: p.precoVenda };
-  });
-}
-function normalizePedido(b, s, old = null) {
-  const cliente = b?.cliente || {};
-  return {
-    id: old?.id || id(), numero: old?.numero || (s.pedidos.reduce((m, p) => Math.max(m, p.numero), 0) + 1),
-    data: old?.data || new Date().toISOString(),
-    vendedor: { nome: required(b?.vendedor?.nome, 'nome do vendedor'), cargo: text(b?.vendedor?.cargo) },
-    cliente: { nome: required(cliente.nome, 'nome do cliente'), numero: text(cliente.numero), documento: text(cliente.documento) },
-    itens: normalizeItems(b.itens, s), status: old?.status || 'Em Análise'
-  };
-}
 function handleApi(req, res, pathname, body) {
   const method = req.method;
   if (pathname === '/api/health' && method === 'GET') return send(res, 200, { ok: true });
@@ -63,8 +42,6 @@ function handleApi(req, res, pathname, body) {
   const u = requireAuth(req);
   if (handlePrivateAuth(req, res, pathname, u, send)) return;
 
-  const parts = pathname.split('/').filter(Boolean);
-  const tipo = parts[1]; const recordId = parts[2]; const acao = parts[3];
   // Etapa 3: cadastros agora ficam em routes/cadastros.js.
   if (handleCadastros(req, res, pathname, body, send)) return;
   // Relatório somente de leitura: reúne os dois cadastros existentes.
@@ -89,46 +66,9 @@ function handleApi(req, res, pathname, body) {
     };
     return send(res, 200, { geradoEm: new Date().toISOString(), resumo, pecas, motos });
   }
-  if (pathname === '/api/pedidos' && method === 'GET') return send(res, 200, getStore().pedidos);
-  if (pathname === '/api/pedidos' && method === 'POST') return send(res, 201, mutate(s => {
-    const x = normalizePedido(body, s); s.pedidos.push(x); return x;
-  }));
-  if (tipo === 'pedidos' && recordId && method === 'PUT' && !acao) return send(res, 200, mutate(s => {
-    const old = findOr404(s.pedidos, recordId, 'Pedido');
-    if (!['Em Análise', 'Pendente'].includes(old.status)) throw new HttpError(409, 'Só é possível editar pedidos em análise ou pendentes.');
-    const x = normalizePedido(body, s, old);
-    s.pedidos = s.pedidos.map(p => p.id === recordId ? x : p); return x;
-  }));
-  if (tipo === 'pedidos' && recordId && acao === 'status' && method === 'PATCH') return send(res, 200, mutate(s => {
-    const p = findOr404(s.pedidos, recordId, 'Pedido');
-    const novo = text(body.status);
-    const transicoes = { 'Em Análise': ['Pendente', 'Aprovado', 'Cancelado'], Pendente: ['Em Análise', 'Aprovado', 'Cancelado'], Aprovado: ['Pendente', 'Cancelado'] };
-    if (!transicoes[p.status]?.includes(novo)) throw new HttpError(409, 'Transição de status não permitida.');
-    p.status = novo; return p;
-  }));
-  if (tipo === 'pedidos' && recordId && acao === 'vender' && method === 'POST') return send(res, 201, mutate(s => {
-    const p = findOr404(s.pedidos, recordId, 'Pedido');
-    if (p.status !== 'Aprovado') throw new HttpError(409, 'O pedido precisa estar aprovado.');
-    for (const item of p.itens) {
-      const peca = findOr404(s.pecas, item.pecaId, 'Peça');
-      if (peca.quantidade < item.qtd) throw new HttpError(409, `Estoque insuficiente: ${peca.descricao}.`);
-    }
-    for (const item of p.itens) findOr404(s.pecas, item.pecaId, 'Peça').quantidade -= item.qtd;
-    const v = { id: id(), numero: s.vendas.reduce((m, v) => Math.max(m, v.numero), 0) + 1,
-      pedidoId: p.id, pedidoNumero: p.numero, data: new Date().toISOString(), vendedor: p.vendedor,
-      cliente: p.cliente, itens: structuredClone(p.itens), total: Math.round(p.itens.reduce((t, i) => t + i.qtd * i.preco, 0) * 100) / 100,
-      status: 'Concluída' };
-    s.vendas.push(v); p.status = 'Faturado'; return v;
-  }));
-  if (pathname === '/api/vendas' && method === 'GET') return send(res, 200, getStore().vendas);
-  if (tipo === 'vendas' && recordId && acao === 'cancelar' && method === 'POST') return send(res, 200, mutate(s => {
-    const v = findOr404(s.vendas, recordId, 'Venda');
-    if (v.status !== 'Concluída') throw new HttpError(409, 'A venda já foi cancelada.');
-    for (const item of v.itens) findOr404(s.pecas, item.pecaId, 'Peça').quantidade += item.qtd;
-    v.status = 'Cancelada'; v.dataCancelamento = new Date().toISOString();
-    findOr404(s.pedidos, v.pedidoId, 'Pedido').status = 'Cancelado';
-    return v;
-  }));
+  // Etapa 4: pedidos, vendas e estoque ficam em modulos separados.
+  if (handlePedidos(req, res, pathname, body, send)) return;
+  if (handleVendas(req, res, pathname, send)) return;
   if (pathname === '/api/config' && method === 'GET') return send(res, 200, { agendamentos: getStore().agendamentos, coresDias: getStore().coresDias });
   if (pathname === '/api/config' && method === 'PATCH') return send(res, 200, mutate(s => {
     if (body.agendamentos !== undefined) {

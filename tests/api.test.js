@@ -114,6 +114,16 @@ test('MotorPoint: autenticação, CRUD, venda e persistência após reiniciar', 
   assert.equal((await call('/api/pecas','GET',undefined,cookie)).data[0].quantidade,2);
   assert.equal((await call('/api/relatorios/pecas-motos','GET',undefined,cookie)).data.resumo.unidadesEmEstoque,2);
 
+  // Venda acima do saldo deve ser recusada sem alterar o estoque.
+  const pedidoSemEstoque = await call('/api/pedidos','POST',{
+    vendedor:{nome:'Admin',cargo:'Gerente'}, cliente:{nome:'Pessoa'},
+    itens:[{pecaId,qtd:3}]
+  },cookie);
+  assert.equal(pedidoSemEstoque.status,201);
+  assert.equal((await call(`/api/pedidos/${pedidoSemEstoque.data.id}/status`,'PATCH',{status:'Aprovado'},cookie)).status,200);
+  assert.equal((await call(`/api/pedidos/${pedidoSemEstoque.data.id}/vender`,'POST',{},cookie)).status,409);
+  assert.equal((await call('/api/pecas','GET',undefined,cookie)).data[0].quantidade,2);
+
   assert.equal((await call(`/api/pecas/${pecaId}`,'DELETE',undefined,cookie)).status,409);
   const canc=await call(`/api/vendas/${venda.data.id}/cancelar`,'POST',{},cookie);
   assert.equal(canc.status,200);
