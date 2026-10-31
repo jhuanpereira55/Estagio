@@ -8,6 +8,7 @@ const { spawn, spawnSync } = require('node:child_process');
 const net = require('node:net');
 const root = fs.mkdtempSync(path.join(os.tmpdir(), 'motorpoint-test-'));
 for (const f of ['server.js','setup.js','server-crypto.js']) fs.copyFileSync(path.join(__dirname,'..',f), path.join(root,f));
+for (const dir of ['storage','lib','auth','routes','services','http']) fs.cpSync(path.join(__dirname,'..',dir),path.join(root,dir),{recursive:true});
 fs.mkdirSync(path.join(root,'data'));
 // As telas sao externas ao repositorio do back-end.
 const front = path.join(root, 'frontend-externo');
@@ -62,6 +63,9 @@ test('MotorPoint: autenticação, CRUD, venda e persistência após reiniciar', 
   assert.equal(login.status,200);
   const cookie=login.cookie;
   assert.ok(cookie.includes('mp_session='));
+  const quemSou = await call('/api/auth/me','GET',undefined,cookie);
+  assert.equal(quemSou.status,200);
+  assert.equal(quemSou.data.perfil,'Administrador');
   assert.equal((await call('/api/relatorios/pecas-motos')).status,401);
   const vazio = await call('/api/relatorios/pecas-motos','GET',undefined,cookie);
   assert.equal(vazio.status,200);
@@ -71,8 +75,13 @@ test('MotorPoint: autenticação, CRUD, venda e persistência após reiniciar', 
   assert.equal(ins.status,201);
   const pecaId=ins.data.id;
   assert.equal((await call('/api/pecas','POST',piece,cookie)).status,409);
+  // Regras do cadastro continuam funcionando depois da separacao das rotas.
+  assert.equal((await call('/api/pecas','POST',{...piece,codigoInterno:'TEST002',quantidade:-1},cookie)).status,400);
+  assert.equal((await call('/api/pecas','PUT',{...piece,descricao:'Teste'},cookie)).status,404);
+  assert.equal((await call(`/api/pecas/${pecaId}`,'PUT',piece,cookie)).status,200);
   const moto=await call('/api/motos','POST',{dono:'Cliente',marca:'Honda',placa:'ABC1D23',cor:'Preta',chassi:'12345678901234567',ano:'2020',modelo:'CG160'},cookie);
   assert.equal(moto.status,201);
+  assert.equal((await call('/api/motos','POST',{dono:'Cliente',marca:'Honda',placa:'XYZ1A23',cor:'Preta',chassi:'curto',ano:'2020',modelo:'CG160'},cookie)).status,400);
   const relatorio = await call('/api/relatorios/pecas-motos','GET',undefined,cookie);
   assert.equal(relatorio.status,200);
   assert.equal(relatorio.data.pecas.length,1);
@@ -86,6 +95,7 @@ test('MotorPoint: autenticação, CRUD, venda e persistência após reiniciar', 
 
   const cadastro=await call('/api/usuarios','POST',{nome:'Cliente Teste',documento:'111.111.111-11',cargo:'Atendente',email:'test@example.com',telefone:'(44) 99999-1111',nivelPermissao:'Operador',senha:'SenhaOperador567'},cookie);
   assert.equal(cadastro.status,201);
+  assert.equal((await call('/api/usuarios','POST',{nome:'Outro',documento:'11111111111',cargo:'Atendente',email:'outro@example.com',telefone:'(44)99999-1111',nivelPermissao:'Operador',senha:'SenhaOperador567'},cookie)).status,409);
   assert.equal(cadastro.data.senhaHash,undefined);
   assert.equal(cadastro.data.senha,undefined);
   assert.equal((await call('/api/usuarios','GET',undefined,cookie)).data[0].salt,undefined);
@@ -104,6 +114,16 @@ test('MotorPoint: autenticação, CRUD, venda e persistência após reiniciar', 
   assert.equal((await call('/api/pecas','GET',undefined,cookie)).data[0].quantidade,2);
   assert.equal((await call('/api/relatorios/pecas-motos','GET',undefined,cookie)).data.resumo.unidadesEmEstoque,2);
 
+  // Venda acima do saldo deve ser recusada sem alterar o estoque.
+  const pedidoSemEstoque = await call('/api/pedidos','POST',{
+    vendedor:{nome:'Admin',cargo:'Gerente'}, cliente:{nome:'Pessoa'},
+    itens:[{pecaId,qtd:3}]
+  },cookie);
+  assert.equal(pedidoSemEstoque.status,201);
+  assert.equal((await call(`/api/pedidos/${pedidoSemEstoque.data.id}/status`,'PATCH',{status:'Aprovado'},cookie)).status,200);
+  assert.equal((await call(`/api/pedidos/${pedidoSemEstoque.data.id}/vender`,'POST',{},cookie)).status,409);
+  assert.equal((await call('/api/pecas','GET',undefined,cookie)).data[0].quantidade,2);
+
   assert.equal((await call(`/api/pecas/${pecaId}`,'DELETE',undefined,cookie)).status,409);
   const canc=await call(`/api/vendas/${venda.data.id}/cancelar`,'POST',{},cookie);
   assert.equal(canc.status,200);
@@ -121,8 +141,11 @@ test('MotorPoint: autenticação, CRUD, venda e persistência após reiniciar', 
   assert.equal((await call('/api/pedidos','GET',undefined,cookie2)).data[0].status,'Cancelado');
   assert.equal((await call('/api/vendas','GET',undefined,cookie2)).data[0].status,'Cancelada');
   assert.equal((await call('/api/config','GET',undefined,cookie2)).data.agendamentos.length,1);
+  assert.equal((await call('/api/config','GET',undefined,cookie2)).data.coresDias['2026-11-01'],'verde');
   assert.equal((await call('/api/usuarios','GET',undefined,cookie2)).data.length,1);
   assert.equal((await call('/api/relatorios/pecas-motos','GET',undefined,cookie2)).data.resumo.totalMotos,1);
   assert.equal((await call('/api/relatorios/pecas-motos','GET',undefined,cookie2)).data.resumo.valorPotencial,127.5);
+  assert.equal((await call('/api/auth/logout','POST',{},cookie2)).status,200);
+  assert.equal((await call('/api/auth/me','GET',undefined,cookie2)).status,401);
 
 });
